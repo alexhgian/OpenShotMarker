@@ -14,7 +14,7 @@
     "e2e": "playwright test",
     "selftest:py": "python3 resolve-plugin/TCFix.py --selftest",
     "verify:crosslang": "npx vite-node scripts/emit-tcfix-fixture.ts -- .tmp-fixture.tcfix.json && python3 resolve-plugin/TCFix.py --selftest && python3 scripts/check_tcfix.py .tmp-fixture.tcfix.json && rm -f .tmp-fixture.tcfix.json",
-    "verify": "npm run test && npm run verify:crosslang"
+    "verify": "npm run test && npm run verify:crosslang && npm run e2e"
   },
   "dependencies": {
     "@types/react": "^18.3.31",
@@ -32,5 +32,8 @@
     "typescript": "^5.9.3",
     "vite": "^5.4.21",
     "vitest": "^2.1.9"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
   }
 }
