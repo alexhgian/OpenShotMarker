@@ -130,8 +130,10 @@ Nothing below can be done from a Linux cloud session.
    `current_org_ids()` with whatever you settle on — until then the policies deny
    everything.
 
-4. **Resolve (§11.1, §11.4).** Copy `resolve-plugin/TCFix.py` into Resolve's Scripts
-   folder, open a throwaway project, and run it in dry-run first. `python3
+4. **Resolve (§11.1, §11.4).** Copy **both** `resolve-plugin/TCFix.py` and
+   `resolve-plugin/tcmath.py` into Resolve's Scripts folder — the maths was factored out
+   so the plugin, `pi-tracker/` and `core/timecode.ts` share one source, and TCFix refuses
+   to run without its sibling. Then, open a throwaway project, and run it in dry-run first. `python3
    resolve-plugin/TCFix.py --selftest` passes here and the exported files load, but the
    plugin has still never been run against a live Resolve. The two things §11.4 asks you
    to check on that first run are the point of the exercise.

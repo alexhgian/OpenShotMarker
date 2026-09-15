@@ -1,9 +1,10 @@
 """
 TCFix — apply a timecode-marker fix file inside DaVinci Resolve.
 
-Install: copy this file to the Scripts folder and it appears under
-Workspace > Scripts. Works in the FREE version because it runs from the menu;
-external (standalone) scripting is what needs Studio.
+Install: copy this file AND tcmath.py to the Scripts folder — they are two files now,
+and TCFix will refuse to run without its sibling rather than guess at the maths. It
+appears under Workspace > Scripts. Works in the FREE version because it runs from the
+menu; external (standalone) scripting is what needs Studio.
 
   Windows  %APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support\\Fusion\\Scripts\\Utility\\
   macOS    ~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/
@@ -44,58 +45,25 @@ MARKER_COLOURS = {
 
 # --------------------------------------------------------------- timecode
 
-RATES = {
-    #  name     nominal  ntsc
-    "23.976": (24, True),
-    "24":     (24, False),
-    "25":     (25, False),
-    "29.97":  (30, True),
-    "30":     (30, False),
-    "50":     (50, False),
-    "59.94":  (60, True),
-    "60":     (60, False),
-}
-
-
-def nominal_of(fps_name):
-    try:
-        return RATES[str(fps_name)]
-    except KeyError:
-        raise ValueError("unsupported fps %r (want one of %s)" % (fps_name, ", ".join(RATES)))
-
-
-def frames_to_tc(frame, fps_name, drop):
-    n, ntsc = nominal_of(fps_name)
-    if drop:
-        if not (ntsc and n in (30, 60)):
-            raise ValueError("drop-frame only exists at 29.97 / 59.94")
-        dropped = 2 if n == 30 else 4
-        per_10min = int(round(n * 1000.0 / 1001.0 * 600))   # 17982 @ 29.97
-        per_min = int(round(n * 1000.0 / 1001.0 * 60))      #  1798 @ 29.97  (NOT 1796)
-        d, m = divmod(frame, per_10min)
-        if m > dropped:
-            frame += dropped * 9 * d + dropped * ((m - dropped) // per_min)
-        else:
-            frame += dropped * 9 * d
-    ff = frame % n
-    ss = (frame // n) % 60
-    mm = (frame // (n * 60)) % 60
-    hh = (frame // (n * 3600)) % 24
-    return "%02d:%02d:%02d%s%02d" % (hh, mm, ss, ";" if drop else ":", ff)
-
-
-def tc_to_frames(tc, fps_name, drop):
-    n, _ = nominal_of(fps_name)
-    parts = tc.replace(";", ":").replace(".", ":").split(":")
-    if len(parts) != 4:
-        raise ValueError("bad timecode %r" % tc)
-    hh, mm, ss, ff = (int(p) for p in parts)
-    frame = ((hh * 60 + mm) * 60 + ss) * n + ff
-    if drop:
-        dropped = 2 if n == 30 else 4
-        total_min = hh * 60 + mm
-        frame -= dropped * (total_min - total_min // 10)
-    return frame
+# The maths lives in tcmath.py so that this plugin, pi-tracker/ (§16.2) and
+# src/core/timecode.ts cannot drift apart. Resolve runs this file from its Scripts
+# folder, where the working directory is not ours, so resolve the sibling explicitly
+# rather than trusting sys.path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    # Exactly the four names this file used to define itself, so nothing that imports
+    # TCFix (scripts/check_tcfix.py, the app's cross-language check) has to change.
+    from tcmath import (           # noqa: E402
+        RATES,
+        nominal_of,
+        frames_to_tc,
+        tc_to_frames,
+    )
+except ImportError:
+    raise SystemExit(
+        "TCFix needs tcmath.py beside it. Copy both files into the Scripts folder; "
+        "they are one unit and the maths is deliberately not duplicated here."
+    )
 
 
 def resolve_tc(tc_string, drop):
@@ -347,12 +315,10 @@ def run_in_resolve(resolve, fusion, bmd):
 # ------------------------------------------------------------------ selftest
 
 def _selftest():
-    assert frames_to_tc(tc_to_frames("00:00:59;29", "29.97", True) + 1, "29.97", True) == "00:01:00;02"
-    assert frames_to_tc(tc_to_frames("00:09:59;29", "29.97", True) + 1, "29.97", True) == "00:10:00;00"
-    for fr in range(0, 2589408, 1009):
-        assert tc_to_frames(frames_to_tc(fr, "29.97", True), "29.97", True) == fr
-    assert frames_to_tc(107892, "29.97", True) == "01:00:00;00"
-    assert frames_to_tc(107892, "29.97", False) == "00:59:56:12"
+    # The timecode vectors now live with the maths; run them from here too, so
+    # `TCFix.py --selftest` still covers everything it used to.
+    import tcmath
+    tcmath.selftest()
 
     class Clip:
         def __init__(self, name, tc, fps="29.97"):

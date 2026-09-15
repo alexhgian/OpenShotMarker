@@ -567,7 +567,12 @@ Resolve — first run on the real machine is Phase 4's first task.
 
 ### 11.1 Install and run
 
-Copy to the Scripts folder; it appears under **Workspace → Scripts**:
+Copy **both `TCFix.py` and `tcmath.py`** to the Scripts folder; `TCFix.py` appears under
+**Workspace → Scripts**. The two files are one unit: the timecode maths lives in `tcmath.py`
+so that the plugin, `pi-tracker/` (§16.2) and `src/core/timecode.ts` cannot drift apart, and
+`TCFix.py` refuses to run without its sibling rather than guessing. Resolve runs scripts from
+a working directory that is not theirs, so `TCFix.py` resolves the sibling from its own path
+rather than trusting `sys.path`.
 
 | | |
 |---|---|
