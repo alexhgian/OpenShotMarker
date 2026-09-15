@@ -1,0 +1,59 @@
+{
+  "format": "tcfix",
+  "version": 1,
+  "generator": "tc-marker-app 0.1.0",
+  "session": {
+    "id": "2026-09-15-elfyou-01",
+    "label": "elfyou — Tuesday",
+    "created": "2026-09-15T18:02:11Z",
+    "device": "alex-iphone"
+  },
+  "reference_camera": "A",
+  "cameras": {
+    "A": {
+      "label": "FX30 main",
+      "fps": "29.97",
+      "drop": true,
+      "offset_frames": 0,
+      "locked_at": "2026-09-15T18:03:40Z",
+      "lock_quality": { "inliers": 14, "residual_frames": 0.4 }
+    },
+    "B": {
+      "label": "FX30 wide",
+      "fps": "29.97",
+      "drop": true,
+      "offset_frames": -4471,
+      "offset_meaning": "A_frame = B_frame + offset_frames",
+      "measured_at": "2026-09-15T18:05:12Z",
+      "confidence_frames": 1,
+      "bin_hint": "CAM B",
+      "lock_quality": { "inliers": 11, "residual_frames": 0.6 }
+    }
+  },
+  "markers": [
+    {
+      "id": "m_01JB7Q8Z0K",
+      "camera": "A",
+      "tc": "10:14:22;07",
+      "frame": 1104761,
+      "type": "great",
+      "color": "Green",
+      "note": "second chorus, the hair flip",
+      "source": "voice",
+      "preroll_ms": 1500,
+      "created": "2026-09-15T18:14:25Z"
+    },
+    {
+      "id": "m_01JB7QB4R2",
+      "camera": "A",
+      "tc": "10:18:04;11",
+      "frame": 1111417,
+      "type": "cutaway",
+      "color": "Yellow",
+      "note": "crowd wide",
+      "source": "tap",
+      "preroll_ms": 1000,
+      "created": "2026-09-15T18:18:08Z"
+    }
+  ]
+}
