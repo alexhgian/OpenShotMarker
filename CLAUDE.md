@@ -67,3 +67,14 @@ supabase/       migrations.
   minute boundaries. The test vectors catch it.
 - Marker frame numbers in the example file were initially wrong by hand-calculation. Every
   example number in docs must be produced by the code, never typed.
+- `Object.keys(RATES)` does not return the rates in source order. `'24'`, `'25'`, `'30'`,
+  `'50'` and `'60'` are canonical array indices, so V8 emits them ahead of `'23.976'`,
+  `'29.97'` and `'59.94'`. `FPS_NAMES` is written out explicitly and a test pins the order;
+  do not "simplify" it back to `Object.keys`.
+- `sql.js` must stay inside Vite's dependency pre-bundle (`optimizeDeps.include`). Its
+  browser entry is CJS/UMD, and excluding it makes the dev server serve a file with no ESM
+  default export — which builds fine for production and fails only under `npm run dev`.
+- Phase 1 ran on a cloud Linux box where `npx playwright install` is blocked and the
+  preinstalled Chromium is a different build from whatever `@playwright/test` resolves to.
+  `playwright.config.ts` points at `/opt/pw-browsers` when it exists and falls back to
+  normal resolution otherwise, so the same config works on a Mac. `CHROMIUM_PATH` overrides.

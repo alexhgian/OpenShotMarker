@@ -170,6 +170,14 @@ the number is right. (Verify on device that `performance.now()` keeps advancing 
 lock/unlock — it does on current iOS and Android, but it is the one assumption here that a
 platform could break.)
 
+**An anchor does not survive a process restart, and must not be persisted as if it did.**
+`anchor.t` is meaningful only within the `performance.now()` epoch it was taken in, and that
+epoch ends when the page or the app is killed. Restoring one across a restart would produce
+confidently wrong timecode rather than an obvious failure, so markers persist and the lock
+does not: on relaunch the camera shows as unlocked and the operator re-locks. This is cheap
+(§4: a re-lock is point-and-hold once the ROI is stored) and it is the safe direction to be
+wrong in. The browser harness asserts it after a reload.
+
 ---
 
 ## 4. The OCR lock
@@ -345,6 +353,11 @@ create table markers (
 
 `frame` is stored alongside `tc` deliberately: it is what every export computes from, and
 recomputing it from the string later means re-deriving drop-frame state you already knew.
+
+The operator-facing "recent markers, newest first" (§9) is indexed on `created_at`, not on
+`frame`: a re-lock can move the timecode backwards, and the list has to stay in the order the
+operator tapped. Exports walk a session in timeline order instead, which has its own index on
+`frame`.
 
 Marker types map to Resolve colours:
 
