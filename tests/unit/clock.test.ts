@@ -117,6 +117,13 @@ describe('§6 multi-camera offset', () => {
     const cNdf = new TcClock({ fps: '29.97', drop: false, anchor: { tcFrame: 0, t: 0 } });
     expect(() => measureOffsetFrames(a, b, 0)).toThrow(/refusing to measure an offset/);
     expect(() => measureOffsetFrames(a, cNdf, 0)).toThrow(/refusing to measure an offset/);
+    // The message names both sides, whichever way round the DF/NDF mismatch runs.
+    expect(() => measureOffsetFrames(a, cNdf, 0)).toThrow(
+      /reference is 29\.97 DF, other is 29\.97 NDF/,
+    );
+    expect(() => measureOffsetFrames(cNdf, a, 0)).toThrow(
+      /reference is 29\.97 NDF, other is 29\.97 DF/,
+    );
   });
 });
 

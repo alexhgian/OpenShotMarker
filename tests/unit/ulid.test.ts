@@ -33,6 +33,15 @@ describe('§8 ULIDs', () => {
     expect(() => ulid(2 ** 49, fixedRandom(0))).toThrow(/out of range/);
   });
 
+  it('still emits a well-formed id if the random source returns short', () => {
+    // Defensive: a Uint8Array shorter than requested would otherwise put `undefined`
+    // into the string and produce an id the store's primary key would accept.
+    const short = () => new Uint8Array(3);
+    const id = ulid(1_757_000_000_000, short);
+    expect(id).toHaveLength(ULID_LEN);
+    expect(isUlid(id)).toBe(true);
+  });
+
   it('rejects non-ULID strings', () => {
     expect(isUlid('too-short')).toBe(false);
     expect(isUlid('U'.repeat(26))).toBe(false); // U is excluded from Crockford base32

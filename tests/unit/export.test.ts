@@ -180,6 +180,22 @@ describe('§10.4 the fix file', () => {
     ).toThrow(/reference_camera "Z" is not in cameras/);
   });
 
+  it('says "none" when the session has no cameras at all', () => {
+    const fx = fixture();
+    expect(() => buildTcfix({ ...fx, cameras: [], markers: [] })).toThrow(
+      /is not in cameras \(none\)/,
+    );
+  });
+
+  it('names the rate and DF state when tc and frame disagree, at NDF too', () => {
+    const fx = fixture();
+    const ndfCams = fx.cameras.map((c) => ({ ...c, drop_frame: false }));
+    const m = { ...fx.markers[0]!, tc: '10:14:22:07', frame: 999 };
+    expect(() => buildTcfix({ ...fx, cameras: ndfCams, markers: [m] })).toThrow(
+      /is inconsistent: tc 10:14:22:07 is not frame 999 at 29\.97 NDF/,
+    );
+  });
+
   it('refuses a marker pointing at a camera that is not in the session', () => {
     const fx = fixture();
     expect(() =>
