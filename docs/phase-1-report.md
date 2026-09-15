@@ -1,11 +1,13 @@
 # Phase 1 report — tc-marker
 
-Built in a cloud Linux session, per `HANDOFF.md`. Everything below runs and is asserted
+Built in a cloud Linux session, per `HANDOFF.md` **as amended by
+`docs/amendments/0001-clock-and-pi-tracker.md`**. Everything below runs and is asserted
 here; nothing in this file is a plan or an intention.
 
-**Status: Phase 1 acceptance met.** 113 unit tests, 6 browser tests, `src/core/` at 100%
-lines, functions, statements and branches, and the TypeScript and Python halves of the
-timecode maths verified against each other on a file the UI actually produced.
+**Status: Phase 1 acceptance met, including amendment 0001 Part A.** 126 unit tests, 7
+browser tests, `src/core/` at 100% lines, functions, statements and branches, and the
+TypeScript and Python halves of the timecode maths verified against each other on a file
+the UI actually produced.
 
 Run everything with `npm run verify` (unit → cross-language → browser).
 
@@ -16,7 +18,9 @@ Run everything with `npm run verify` (unit → cross-language → browser).
 | Area | Files | What it does |
 |---|---|---|
 | Timecode maths (§3.1–3.2) | `src/core/timecode.ts` | Rates table, `framesToTc`, `tcToFrames`, `realFps`, `framesPerDay`/`wrapFrame`, `fcpxmlRational` |
-| The clock (§3.3, §5, §6) | `src/core/clock.ts` | Anchor + rate, `tcFrameAt`, drift clamp, offset measurement |
+| The clock (§3.3, §3.4, §5, §6) | `src/core/clock.ts` | Three-value anchor, `readAt` with the stale guard, drift clamp, offset measurement |
+| Clock source (§3.3) | `src/platform/clock.ts`, `plugins/continuous-clock/` | Injected source; native plugin written for iOS/Android/web, built on none |
+| Shared Python maths | `resolve-plugin/tcmath.py` | One source of truth for `TCFix.py` and, later, `pi-tracker/` |
 | Markers (§5, §8) | `src/core/markers.ts`, `src/core/ulid.ts` | Marker/session/camera creation, pre-roll, type→colour, soft delete, ULIDs |
 | Exports (§10.3, §10.4) | `src/core/export/{csv,tcfix}.ts` | CSV and `.tcfix.json` |
 | Schema (§8) | `src/core/schema.ts`, `supabase/migrations/0001_markers.sql` | SQLite and Postgres, same shape |
@@ -53,6 +57,18 @@ synchronously. A fifth test reads `App.tsx` and fails if the handler gains `asyn
 if the capture moves after the first `setState`, or if the pad is rewired from `pointerdown`
 to `click`.
 
+**A sleeping phone is caught rather than trusted (§3.4, amendment 0001 Part A).** The
+amendment corrected a wrong claim in §3.3: the monotonic counter pauses in deep sleep, so a
+phone pocketed for twenty minutes comes back twenty minutes behind, silently. Every anchor
+now carries `mono` and a `wall` witness; when they disagree by more than a second the lock is
+stale, the chip says so, and markers are still accepted — timed from wall time and labelled
+`wall-fallback` rather than presented as exact. A re-lock re-derives them from their stored
+`wall_ms` and flags them `corrected`. Proved twice: a unit test advancing the fake wall clock
+20 minutes against a frozen monotonic clock, and a browser test that freezes
+`performance.now()` while `Date.now()` jumps, then walks the whole cycle through to
+`corrected`. On device the counter is `mach_continuous_time()` /
+`elapsedRealtimeNanos()` and the guard should never fire; it stays in for the day it does.
+
 **The local-first path works with no network and survives a restart.** The Playwright suite
 locks camera A by typing `10:00:00;00` at 29.97 DF, taps **Great**, and asserts the marker
 lands 40–75 frames behind the running clock — the 45 frames of default pre-roll (§5), plus
@@ -62,8 +78,9 @@ than living in memory. Deletes are soft: gone from the list, still present for s
 
 ## What changed in the spec, and why
 
-Both changes came out of the build, and both are committed alongside the code that caused
-them.
+These came out of the build, and each is committed alongside the code that caused it.
+They are separate from amendment 0001, which arrived from outside and is applied in its
+own commit.
 
 1. **§3.3 — an anchor must not be persisted across a process restart.** `anchor.t` is only
    meaningful inside the `performance.now()` epoch it was taken in, and that epoch dies with
@@ -73,6 +90,14 @@ them.
 2. **§8 — "recent markers, newest first" is indexed on `created_at`, not `frame`.** A
    re-lock can move the timecode backwards, and the operator's list has to stay in the order
    they tapped. Exports still walk a session in frame order, which has its own index.
+
+Applying amendment 0001 forced two more, both recorded in the commits that made them.
+`SCHEMA_VERSION` went to 2, and `create table if not exists` does nothing to a table that
+already exists — so any database written before that commit would have kept a markers table
+with no `wall_ms` and failed every insert. `schema.ts` now carries `MIGRATIONS`, and a test
+builds a genuine v1 database by hand and migrates it. And factoring `tcmath.py` out made the
+Resolve plugin two files, so §11.1 now says to copy both and `TCFix.py` exits with an
+instruction rather than a traceback if its sibling is missing.
 
 Three traps were added to `CLAUDE.md`: `Object.keys` on the rates table does not return
 source order (`'24'`, `'25'`, `'30'`, `'50'`, `'60'` are canonical array indices, so V8
@@ -84,6 +109,9 @@ only under `npm run dev`; and this environment's Playwright/Chromium version mis
 
 Untouched, per "Out of scope for Phase 1": OCR, `getUserMedia`, Tesseract, speech
 recognition, runtime Supabase sync, EDL and FCPXML writers, and iOS/Android builds.
+
+Of amendment 0001 Part B, only `tcmath.py` was factored out, as the amendment directs.
+There is no `pi-tracker/` directory, no reader, no server, and no fixtures.
 
 One boundary call worth naming: `fcpxmlRational()` exists in `timecode.ts` because the
 handoff lists the rational-time vector (`frame 1104761 → "1105865761/30000s"`) among the
@@ -111,11 +139,14 @@ Nothing below can be done from a Linux cloud session.
 
 2. **iOS on a real phone.** Open `ios/App/App.xcworkspace` in Xcode, sign with the eGen
    team, run on a device.
-   - **Verify the one assumption this design rests on (§3.3):** that `performance.now()`
-     keeps advancing across a lock/unlock. Lock camera A, lock the phone, wait a few
-     minutes, wake it, and check the running timecode is still correct — not merely
-     running. If it is not, the free-run clock needs a different monotonic source and that
-     is a spec-level change, not a bug fix.
+   - **Build the continuous-clock plugin and confirm it survives a pocket.** The native
+     sources in `plugins/continuous-clock/` have never been compiled — there was no Xcode
+     and no Android SDK in the cloud session. Add the plugin to the app, wire
+     `resolveClockSource()` into `App.tsx` in place of the `performanceClock` constant,
+     then lock camera A, lock the phone, leave it twenty minutes, wake it, and check the
+     running timecode is still correct — not merely running. With the plugin working the
+     §3.4 chip should stay green; without it, it should go red and say `STALE`. Both
+     outcomes are informative, and the second is the one the guard exists for.
    - `Info.plist` already carries `NSCameraUsageDescription`,
      `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription`. Nothing in
      Phase 1 triggers them; they are there for §4 and §7.
