@@ -1,16 +1,19 @@
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { MarkerRecorder } from '../../src/ui/recorder';
-import { TcClock } from '../../src/core/clock';
+import { TcClock, type ClockReading } from '../../src/core/clock';
 import { tcToFrames, realFps } from '../../src/core/timecode';
 import type { Marker } from '../../src/core/markers';
 import type { MarkerStore } from '../../src/platform/store';
+
+const NOW = 1_757_000_000_000;
+const running = (ms: number): ClockReading => ({ mono: ms, wall: NOW + ms });
 
 const clock = () =>
   new TcClock({
     fps: '29.97',
     drop: true,
-    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), t: 0 },
+    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), ...running(0) },
   });
 
 /** A store whose writes never settle — stands in for a wedged disk or a dead radio. */
@@ -46,7 +49,7 @@ function recordingStore(): { store: MarkerStore; written: Marker[]; resolve: () 
   return { store, written, resolve: () => release() };
 }
 
-const deps = (store: MarkerStore, now: () => number, extra = {}) => ({
+const deps = (store: MarkerStore, now: () => ClockReading, extra = {}) => ({
   store,
   clock: clock(),
   session_id: 'S',
@@ -58,7 +61,7 @@ const deps = (store: MarkerStore, now: () => number, extra = {}) => ({
 
 describe('§9 rule 1 — the timestamp is taken before the store write', () => {
   it('returns a finished marker even when the store write never resolves', () => {
-    const rec = new MarkerRecorder(deps(hangingStore(), () => 0));
+    const rec = new MarkerRecorder(deps(hangingStore(), () => running(0)));
     const m = rec.capture('great');
     // A complete, correct marker exists synchronously; nothing awaited the store.
     expect(m.frame).toBe(1104761 - Math.round(1.5 * realFps('29.97')));
@@ -70,7 +73,7 @@ describe('§9 rule 1 — the timestamp is taken before the store write', () => {
     const order: string[] = [];
     const now = () => {
       order.push('now');
-      return 0;
+      return running(0);
     };
     const store = {
       putMarker: async () => {
@@ -88,7 +91,7 @@ describe('§9 rule 1 — the timestamp is taken before the store write', () => {
   it('does not move the number while the write is in flight', async () => {
     const { store, written, resolve } = recordingStore();
     let t = 0;
-    const rec = new MarkerRecorder(deps(store, () => t));
+    const rec = new MarkerRecorder(deps(store, () => running(t)));
     const returned = rec.capture('great');
 
     // The clock runs on for ten seconds before the write lands.
@@ -140,7 +143,7 @@ describe('the recorder hands the write off without waiting', () => {
       persist: async () => {},
     } as unknown as MarkerStore;
     const rec = new MarkerRecorder(
-      deps(store, () => 0, { onCommitted: (m: Marker) => committed.push(m) }),
+      deps(store, () => running(0), { onCommitted: (m: Marker) => committed.push(m) }),
     );
     const m = rec.capture('cutaway');
     await vi.waitFor(() => expect(committed).toHaveLength(1));
@@ -155,7 +158,7 @@ describe('the recorder hands the write off without waiting', () => {
       },
       persist: async () => {},
     } as unknown as MarkerStore;
-    const rec = new MarkerRecorder(deps(store, () => 0, { onError: (_m: Marker, e: unknown) => errors.push(e) }));
+    const rec = new MarkerRecorder(deps(store, () => running(0), { onError: (_m: Marker, e: unknown) => errors.push(e) }));
     rec.capture('note');
     await vi.waitFor(() => expect(errors).toHaveLength(1));
     expect(String(errors[0])).toContain('disk full');
@@ -168,13 +171,13 @@ describe('the recorder hands the write off without waiting', () => {
       },
       persist: async () => {},
     } as unknown as MarkerStore;
-    const rec = new MarkerRecorder(deps(store, () => 0));
+    const rec = new MarkerRecorder(deps(store, () => running(0)));
     expect(() => rec.capture('note')).not.toThrow();
     await new Promise((r) => setTimeout(r, 5));
   });
 
   it('attaches a typed note and honours a pre-roll override', () => {
-    const rec = new MarkerRecorder(deps(hangingStore(), () => 0));
+    const rec = new MarkerRecorder(deps(hangingStore(), () => running(0)));
     const m = rec.capture('great', { note: 'hair flip', source: 'typed', prerollMs: 0 });
     expect(m.note).toBe('hair flip');
     expect(m.source).toBe('typed');
@@ -184,7 +187,7 @@ describe('the recorder hands the write off without waiting', () => {
 
   it('sends an edited row back through the same handoff', async () => {
     const { store, written, resolve } = recordingStore();
-    const rec = new MarkerRecorder(deps(store, () => 0));
+    const rec = new MarkerRecorder(deps(store, () => running(0)));
     const m = rec.capture('great');
     rec.update({ ...m, note: 'edited' });
     resolve();

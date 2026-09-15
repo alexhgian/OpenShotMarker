@@ -12,6 +12,7 @@ export const CSV_COLUMNS = [
   'type',
   'note',
   'source',
+  'clock',
   'created',
   'device',
 ] as const;
@@ -46,6 +47,7 @@ export function markersToCsv(markers: Marker[], opts: CsvOptions = {}): string {
         csvCell(m.type),
         csvCell(m.note),
         csvCell(m.source),
+        csvCell(m.clock),
         csvCell(m.created_at),
         csvCell(m.device),
       ].join(','),

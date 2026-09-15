@@ -150,6 +150,50 @@ test('the exported .tcfix.json is accepted by TCFix.py and every frame re-derive
   expect(file.cameras.B.offset_meaning).toBe('A_frame = B_frame + offset_frames');
 });
 
+test('a slept phone shows STALE and still accepts markers (§3.4)', async ({ page }) => {
+  // Simulate the phone sleeping: freeze performance.now() where it is, while Date.now()
+  // jumps twenty minutes. That is exactly what a paused monotonic counter looks like.
+  await page.addInitScript(() => {
+    const realPerfNow = performance.now.bind(performance);
+    const realDateNow = Date.now.bind(Date);
+    let frozenAt: number | null = null;
+    let wallJumpMs = 0;
+    (window as unknown as { __sleep: (ms: number) => void }).__sleep = (ms: number) => {
+      frozenAt = realPerfNow();
+      wallJumpMs = ms;
+    };
+    performance.now = () => (frozenAt === null ? realPerfNow() : frozenAt);
+    Date.now = () => realDateNow() + wallJumpMs;
+  });
+  await page.goto('/');
+  await page.evaluate(() => indexedDB.deleteDatabase('tc-marker'));
+  await page.reload();
+
+  await lockCameraA(page, '10:00:00;00');
+  await expect(page.getByTestId('chip-A')).toHaveAttribute('data-state', 'locked');
+
+  await page.evaluate(() => (window as unknown as { __sleep: (ms: number) => void }).__sleep(20 * 60_000));
+
+  await expect(page.getByTestId('running-tc')).toHaveAttribute('data-stale', 'yes');
+  await expect(page.getByTestId('chip-A')).toHaveAttribute('data-state', 'stale');
+  await expect(page.getByTestId('chip-A')).toContainText('STALE');
+  await expect(page.getByTestId('stale-banner')).toBeVisible();
+
+  // §3.4: a marker taken now is still accepted, and labelled honestly.
+  await page.getByTestId('pad-great').dispatchEvent('pointerdown');
+  const row = page.getByTestId('marker-row').first();
+  await expect(row).toBeVisible();
+  const staleTc = (await row.getAttribute('data-tc'))!;
+  // It landed ~20 minutes after the lock, from wall time, not back at 10:00.
+  expect(tcToFrames2997df(staleTc)).toBeGreaterThan(tcToFrames2997df('10:19:00;00'));
+
+  // Re-locking corrects it and clears the flag.
+  await lockCameraA(page, '10:30:00;00');
+  await expect(page.getByTestId('running-tc')).toHaveAttribute('data-stale', 'no');
+  await expect(page.getByTestId('chip-A')).toHaveAttribute('data-state', 'locked');
+  await expect(page.getByTestId('marker-row').first()).toHaveAttribute('data-clock', 'corrected');
+});
+
 test('the CSV export carries the documented columns', async ({ page }) => {
   await lockCameraA(page);
   await page.getByTestId('pad-great').dispatchEvent('pointerdown');
@@ -159,6 +203,8 @@ test('the CSV export carries the documented columns', async ({ page }) => {
     page.getByTestId('export-csv').click(),
   ]);
   const csv = readFileSync(await download.path(), 'utf8');
-  expect(csv.split('\r\n')[0]).toBe('timecode,frame,camera,type,note,source,created,device');
+  expect(csv.split('\r\n')[0]).toBe(
+    'timecode,frame,camera,type,note,source,clock,created,device',
+  );
   expect(csv.split('\r\n')[1]).toContain(',A,great,');
 });

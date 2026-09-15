@@ -44,6 +44,8 @@ export interface TcfixFile {
     note: string;
     source: string;
     preroll_ms: number;
+    /** §3.4 provenance: mono | wall-fallback | corrected. TCFix.py ignores it. */
+    clock: string;
     created: string;
   }>;
 }
@@ -122,6 +124,7 @@ export function buildTcfix(input: {
           note: m.note,
           source: m.source,
           preroll_ms: m.preroll_ms,
+          clock: m.clock,
           created: m.created_at,
         };
       }),

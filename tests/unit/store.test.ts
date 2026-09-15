@@ -11,15 +11,16 @@ import {
   type Session,
   type Camera,
 } from '../../src/core/markers';
-import { TcClock } from '../../src/core/clock';
+import { TcClock, type ClockReading } from '../../src/core/clock';
 import { tcToFrames } from '../../src/core/timecode';
 
 const NOW = 1_757_000_000_000;
+const running = (ms: number): ClockReading => ({ mono: ms, wall: NOW + ms });
 const clock = () =>
   new TcClock({
     fps: '29.97',
     drop: true,
-    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), t: 0 },
+    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), ...running(0) },
   });
 
 let blobs: MemoryBlobStore;
@@ -53,7 +54,7 @@ const marker = (n: number, over: Partial<Parameters<typeof createMarker>[0]> = {
     session_id: session.id,
     camera_id: cam.id,
     type: 'great',
-    tCapturedMs: n * 1000,
+    captured: running(n * 1000),
     prerollMs: 0,
     clock: clock(),
     device: 'alex-iphone',
@@ -199,8 +200,60 @@ describe('§2 persistence — the write is the commit', () => {
   it('records the schema version it wrote', async () => {
     await store.persist();
     const reopened = await fresh();
-    expect(SCHEMA_VERSION).toBe(1);
+    expect(SCHEMA_VERSION).toBe(2);
     expect(await reopened.getSession(session.id)).not.toBeNull();
+  });
+
+  it('migrates a database written before amendment 0001 (v1 -> v2)', async () => {
+    // Build a genuine v1 database by hand: the pre-amendment markers table, with no
+    // wall_ms and no clock, and meta saying version 1.
+    const initSqlJs = (await import('sql.js')).default;
+    const SQL = await initSqlJs({});
+    const old = new SQL.Database();
+    old.run(`
+      create table sessions (id text primary key, label text not null, fps text not null,
+        drop_frame integer not null, reference_camera text not null, device text not null,
+        created_at text not null, updated_at text not null);
+      create table cameras (id text primary key, session_id text not null, key text not null,
+        label text, fps text not null, drop_frame integer not null, roi text,
+        offset_frames integer not null default 0, offset_measured_at text,
+        offset_confidence_frames real, bin_hint text, last_locked_at text, lock_quality text,
+        unique (session_id, key));
+      create table markers (id text primary key, session_id text not null,
+        camera_id text not null, tc text not null, frame integer not null, type text not null,
+        color text not null, note text not null default '', source text not null,
+        preroll_ms integer not null, audio_path text, device text not null,
+        created_at text not null, updated_at text not null, deleted_at text);
+      create table meta (key text primary key, value text not null);
+      insert into meta values ('schema_version', '1');
+      insert into sessions values ('s1', 'old show', '29.97', 1, 'A', 'old-phone', 'x', 'x');
+      insert into cameras (id, session_id, key, fps, drop_frame)
+        values ('c1', 's1', 'A', '29.97', 1);
+      insert into markers values ('m1', 's1', 'c1', '10:14:22;07', 1104761, 'great', 'Green',
+        'from before the amendment', 'tap', 1500, null, 'old-phone', 'x', 'x', null);
+    `);
+    const v1Blobs = new MemoryBlobStore();
+    await v1Blobs.set('db', old.export());
+    old.close();
+
+    const migrated = new SqlJsStore({ blobStore: v1Blobs });
+    await migrated.init();
+
+    // The old row survives, with honest defaults for the columns it never had.
+    const [got] = await migrated.listMarkers('s1');
+    expect(got!.note).toBe('from before the amendment');
+    expect(got!.frame).toBe(1104761);
+    expect(got!.clock).toBe('mono');
+    expect(got!.wall_ms).toBe(0);
+
+    // And the migrated database now accepts a new-shape write.
+    const s2 = createSession({ label: 'x', fps: '29.97', drop_frame: true, device: 'd' });
+    await migrated.putSession(s2);
+    await expect(
+      migrated.putMarker({ ...got!, id: 'm2', wall_ms: 123, clock: 'corrected' }),
+    ).resolves.toBeUndefined();
+    const rows = await migrated.listMarkers('s1');
+    expect(rows.find((m) => m.id === 'm2')?.clock).toBe('corrected');
   });
 
   it('closes idempotently', async () => {

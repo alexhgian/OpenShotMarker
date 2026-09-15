@@ -6,7 +6,26 @@
  * and the Capacitor SQLite store run exactly these statements, so the two cannot drift.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+/**
+ * Migrations from an earlier on-disk schema, applied in order for any version below
+ * SCHEMA_VERSION. `create table if not exists` does nothing to a table that already
+ * exists, so a database written before amendment 0001 would otherwise keep a markers
+ * table with no wall_ms and no clock, and every insert would fail.
+ *
+ * SQLite's ALTER TABLE ADD COLUMN requires a non-null column to carry a default. The
+ * defaults chosen here are the honest ones for rows that predate the §3.4 guard: those
+ * markers were taken from the monotonic clock, and no wall witness was recorded.
+ */
+export const MIGRATIONS: Record<number, string> = {
+  // v1 -> v2: amendment 0001 Part A.
+  2: `
+    alter table markers add column wall_ms integer not null default 0;
+    alter table markers add column clock text not null default 'mono';
+    alter table cameras add column anchor text;
+  `,
+};
 
 export const SCHEMA_SQL = `
 pragma foreign_keys = on;
@@ -36,6 +55,7 @@ create table if not exists cameras (
   bin_hint                 text,
   last_locked_at           text,
   lock_quality             text,
+  anchor                   text,
   unique (session_id, key)
 );
 
@@ -50,6 +70,8 @@ create table if not exists markers (
   note        text not null default '',
   source      text not null,
   preroll_ms  integer not null,
+  wall_ms     integer not null,
+  clock       text not null default 'mono',
   audio_path  text,
   device      text not null,
   created_at  text not null,

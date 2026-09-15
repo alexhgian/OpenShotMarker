@@ -510,8 +510,10 @@ Markers hang off a single `<gap>` spanning the session:
 
 ### 10.3 CSV
 
-`timecode,frame,camera,type,note,source,created,device`. The sanity check when an import
-looks wrong.
+`timecode,frame,camera,type,note,source,clock,created,device`. The sanity check when an
+import looks wrong — which is exactly why it carries the §3.4 `clock` provenance: "every
+marker after 14:05 says `wall-fallback`" is the fastest possible diagnosis of a phone that
+slept mid-show.
 
 ### 10.4 The fix file — `.tcfix.json`
 

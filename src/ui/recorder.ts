@@ -12,7 +12,7 @@
  */
 
 import { createMarker, type Marker, type MarkerType, type MarkerSource } from '../core/markers';
-import type { TcClock, MonotonicNow } from '../core/clock';
+import type { TcClock, ClockReading } from '../core/clock';
 import type { MarkerStore } from '../platform/store';
 
 export interface RecorderDeps {
@@ -21,8 +21,11 @@ export interface RecorderDeps {
   session_id: string;
   camera_id: string;
   device: string;
-  /** §3.3: performance.now(). Injected so tests need no real time. */
-  now: MonotonicNow;
+  /**
+   * Reads the monotonic counter and the wall-clock witness together (§3.4). Injected so
+   * tests need no real time, and so the device can swap in the continuous clock.
+   */
+  now: () => ClockReading;
   /** Called after the row is durable, so the UI can move a row from local to synced. */
   onCommitted?: (marker: Marker) => void;
   onError?: (marker: Marker, err: unknown) => void;
@@ -42,13 +45,13 @@ export class MarkerRecorder {
    * handler; everything else in that handler may happen whenever it likes.
    */
   capture(type: MarkerType, opts: CaptureOptions = {}): Marker {
-    const tCapturedMs = this.deps.now(); // ← the number. Nothing above it, nothing awaited.
+    const captured = this.deps.now(); // ← the numbers. Nothing above, nothing awaited.
 
     const marker = createMarker({
       session_id: this.deps.session_id,
       camera_id: this.deps.camera_id,
       type,
-      tCapturedMs,
+      captured,
       clock: this.deps.clock,
       device: this.deps.device,
       note: opts.note ?? '',

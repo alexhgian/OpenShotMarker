@@ -55,7 +55,7 @@ const camB = {
 const clock = new TcClock({
   fps: '29.97',
   drop: true,
-  anchor: { tcFrame: 0, t: 0 },
+  anchor: { tcFrame: 0, mono: 0, wall: NOW },
 });
 
 const types = ['earmark', 'great', 'cutaway', 'inout', 'note'] as const;
@@ -73,7 +73,7 @@ for (let frame = 0; frame < perDay; frame += 1009) {
       session_id: session.id,
       camera_id: n % 3 === 0 ? camB.id : camA.id,
       type: types[n % types.length]!,
-      tCapturedMs: tSec * 1000,
+      captured: { mono: tSec * 1000, wall: NOW + tSec * 1000 },
       prerollMs: 0,
       clock,
       device: 'alex-iphone',
@@ -95,7 +95,10 @@ for (const [tc, type] of [
       session_id: session.id,
       camera_id: camA.id,
       type,
-      tCapturedMs: (tcToFrames(tc, '29.97', true) / realFps('29.97')) * 1000,
+      captured: {
+        mono: (tcToFrames(tc, '29.97', true) / realFps('29.97')) * 1000,
+        wall: NOW + (tcToFrames(tc, '29.97', true) / realFps('29.97')) * 1000,
+      },
       prerollMs: 0,
       clock,
       device: 'alex-iphone',

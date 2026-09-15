@@ -11,20 +11,24 @@ import {
   prerollFor,
   withNote,
   softDelete,
+  correctMarker,
   isLive,
 } from '../../src/core/markers';
-import { TcClock } from '../../src/core/clock';
+import { TcClock, type ClockReading } from '../../src/core/clock';
 import { tcToFrames, realFps } from '../../src/core/timecode';
 import { isUlid } from '../../src/core/ulid';
 
 const fixedRandom = (len: number) => new Uint8Array(len).fill(0);
 const NOW = 1_757_000_000_000;
 
+/** Both clocks agree: the monotonic counter is running. */
+const running = (ms: number): ClockReading => ({ mono: ms, wall: NOW + ms });
+
 const clock29 = () =>
   new TcClock({
     fps: '29.97',
     drop: true,
-    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), t: 5000 },
+    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), ...running(5000) },
   });
 
 const base = {
@@ -52,7 +56,7 @@ describe('§8 marker type to Resolve colour', () => {
   it('refuses a type that is not one of the five', () => {
     expect(() =>
       // @ts-expect-error deliberately wrong type
-      createMarker({ ...base, type: 'banger', tCapturedMs: 5000, clock: clock29() }),
+      createMarker({ ...base, type: 'banger', captured: running(5000), clock: clock29() }),
     ).toThrow(/unknown marker type/);
   });
 });
@@ -76,19 +80,24 @@ describe('§5 pre-roll', () => {
     const clock = clock29();
     // 1.5 s at 29.97 real fps is 45 frames (44.955 rounded).
     expect(Math.round(1.5 * realFps('29.97'))).toBe(45);
-    expect(markerFrame(clock, 5000, 1500)).toBe(1104761 - 45);
-    expect(markerFrame(clock, 5000, 0)).toBe(1104761);
+    expect(markerFrame(clock, running(5000), 1500).frame).toBe(1104761 - 45);
+    expect(markerFrame(clock, running(5000), 0).frame).toBe(1104761);
+    expect(markerFrame(clock, running(5000), 1500).clock).toBe('mono');
   });
 
   it('wraps a pre-roll that crosses back over midnight', () => {
-    const clock = new TcClock({ fps: '29.97', drop: true, anchor: { tcFrame: 0, t: 0 } });
-    expect(markerFrame(clock, 0, 1500)).toBe(2589408 - 45);
+    const clock = new TcClock({
+      fps: '29.97',
+      drop: true,
+      anchor: { tcFrame: 0, ...running(0) },
+    });
+    expect(markerFrame(clock, running(0), 1500).frame).toBe(2589408 - 45);
   });
 });
 
 describe('§8 createMarker', () => {
   it('stores frame alongside tc, and they agree', () => {
-    const m = createMarker({ ...base, type: 'great', tCapturedMs: 5000, clock: clock29() });
+    const m = createMarker({ ...base, type: 'great', captured: running(5000), clock: clock29() });
     expect(m.frame).toBe(1104761 - 45);
     // 1104761 - 45; value taken from TCFix.frames_to_tc, never hand-calculated.
     expect(m.tc).toBe('10:14:20;22');
@@ -99,7 +108,7 @@ describe('§8 createMarker', () => {
     const m = createMarker({
       ...base,
       type: 'cutaway',
-      tCapturedMs: 5000,
+      captured: running(5000),
       clock: clock29(),
       note: 'crowd wide',
       source: 'voice',
@@ -120,7 +129,7 @@ describe('§8 createMarker', () => {
   });
 
   it('defaults source to tap and note to empty', () => {
-    const m = createMarker({ ...base, type: 'note', tCapturedMs: 5000, clock: clock29() });
+    const m = createMarker({ ...base, type: 'note', captured: running(5000), clock: clock29() });
     expect(m.source).toBe('tap');
     expect(m.note).toBe('');
     expect(m.color).toBe('Cream');
@@ -130,7 +139,7 @@ describe('§8 createMarker', () => {
     const m = createMarker({
       ...base,
       type: 'note',
-      tCapturedMs: 5000,
+      captured: running(5000),
       clock: clock29(),
       audio_path: '/local/a.m4a',
     });
@@ -141,7 +150,7 @@ describe('§8 createMarker', () => {
     const m = createMarker({
       ...base,
       type: 'great',
-      tCapturedMs: 5000,
+      captured: running(5000),
       clock: clock29(),
       prerollMs: 3000,
     });
@@ -155,7 +164,7 @@ describe('§8 createMarker', () => {
       camera_id: 'C',
       device: 'd',
       type: 'great',
-      tCapturedMs: 5000,
+      captured: running(5000),
       clock: clock29(),
     });
     expect(m.frame).toBe(1104761 - 45);
@@ -166,16 +175,103 @@ describe('§8 createMarker', () => {
     // The whole point of §9 rule 1: passing the same tCapturedMs must give the same
     // frame however much later createMarker runs.
     const clock = clock29();
-    const a = createMarker({ ...base, type: 'great', tCapturedMs: 5000, clock });
-    const b = createMarker({ ...base, type: 'great', tCapturedMs: 5000, clock, nowMs: NOW + 9e6 });
+    const a = createMarker({ ...base, type: 'great', captured: running(5000), clock });
+    const b = createMarker({ ...base, type: 'great', captured: running(5000), clock, nowMs: NOW + 9e6 });
     expect(b.frame).toBe(a.frame);
     expect(b.tc).toBe(a.tc);
   });
 });
 
+describe('§3.4 provenance and the post-re-lock correction', () => {
+  /** The phone slept: wall time moved, the monotonic counter did not. */
+  const slept = (wallMs: number) => ({ mono: 5000, wall: NOW + 5000 + wallMs });
+
+  it('records the wall-clock witness on every marker, running or not', () => {
+    const m = createMarker({ ...base, type: 'great', captured: running(5000), clock: clock29() });
+    expect(m.wall_ms).toBe(NOW + 5000);
+    expect(m.clock).toBe('mono');
+  });
+
+  it('still accepts a marker while the lock is stale, and labels it honestly', () => {
+    const twentyMin = 20 * 60_000;
+    const m = createMarker({
+      ...base,
+      type: 'great',
+      captured: slept(twentyMin),
+      clock: clock29(),
+      prerollMs: 0,
+    });
+    // Losing the operator's intent is worse than an imprecise time (§3.4).
+    expect(m.clock).toBe('wall-fallback');
+    expect(m.wall_ms).toBe(NOW + 5000 + twentyMin);
+    expect(m.frame).toBe(1104761 + Math.round((twentyMin / 1000) * realFps('29.97')));
+  });
+
+  it('re-derives a stale marker against the new anchor and flags it corrected', () => {
+    const twentyMin = 20 * 60_000;
+    const stale = createMarker({
+      ...base,
+      type: 'great',
+      captured: slept(twentyMin),
+      clock: clock29(),
+      prerollMs: 0,
+    });
+
+    // The operator re-locks: a fresh anchor where both clocks agree again.
+    const relocked = new TcClock({
+      fps: '29.97',
+      drop: true,
+      anchor: {
+        tcFrame: tcToFrames('10:40:00;00', '29.97', true),
+        mono: 9_000_000,
+        wall: NOW + 5000 + 25 * 60_000,
+      },
+    });
+
+    const fixed = correctMarker(stale, relocked, NOW + 9e6);
+    expect(fixed.clock).toBe('corrected');
+    expect(fixed.updated_at).toBe(new Date(NOW + 9e6).toISOString());
+    // Five minutes before the new lock, derived from the stored wall timestamp.
+    expect(fixed.frame).toBe(
+      tcToFrames('10:40:00;00', '29.97', true) - Math.round((5 * 60) * realFps('29.97')),
+    );
+    expect(tcToFrames(fixed.tc, '29.97', true)).toBe(fixed.frame);
+  });
+
+  it('re-applies the pre-roll when correcting, since wall_ms is the raw tap instant', () => {
+    const stale = createMarker({
+      ...base,
+      type: 'great',
+      captured: slept(60_000),
+      clock: clock29(),
+    });
+    expect(stale.preroll_ms).toBe(1500);
+    const relocked = new TcClock({
+      fps: '29.97',
+      drop: true,
+      anchor: { tcFrame: 1104761, mono: 0, wall: NOW + 5000 },
+    });
+    const fixed = correctMarker(stale, relocked);
+    expect(fixed.frame).toBe(1104761 + Math.round(60 * realFps('29.97')) - 45);
+  });
+
+  it('leaves a good marker alone — correcting a right number would make it wrong', () => {
+    const good = createMarker({ ...base, type: 'great', captured: running(5000), clock: clock29() });
+    const relocked = new TcClock({
+      fps: '29.97',
+      drop: true,
+      anchor: { tcFrame: 999_999, mono: 0, wall: 0 },
+    });
+    expect(correctMarker(good, relocked)).toBe(good);
+    // And a marker already corrected is not corrected twice.
+    const twice = { ...good, clock: 'corrected' as const };
+    expect(correctMarker(twice, relocked)).toBe(twice);
+  });
+});
+
 describe('§8 edits, soft deletes and sync', () => {
   it('bumps updated_at when a note is edited', () => {
-    const m = createMarker({ ...base, type: 'great', tCapturedMs: 5000, clock: clock29() });
+    const m = createMarker({ ...base, type: 'great', captured: running(5000), clock: clock29() });
     const edited = withNote(m, 'the hair flip', NOW + 60_000);
     expect(edited.note).toBe('the hair flip');
     expect(edited.updated_at).toBe(new Date(NOW + 60_000).toISOString());
@@ -185,7 +281,7 @@ describe('§8 edits, soft deletes and sync', () => {
   });
 
   it('soft-deletes so the delete reaches the server as a row, not an absence', () => {
-    const m = createMarker({ ...base, type: 'great', tCapturedMs: 5000, clock: clock29() });
+    const m = createMarker({ ...base, type: 'great', captured: running(5000), clock: clock29() });
     expect(isLive(m)).toBe(true);
     const gone = softDelete(m, NOW + 1000);
     expect(gone.deleted_at).toBe(new Date(NOW + 1000).toISOString());

@@ -10,7 +10,7 @@
  */
 
 import { framesToTc, realFps, wrapFrame, type FpsName } from './timecode';
-import { TcClock } from './clock';
+import { TcClock, type ClockReading, type ClockProvenance } from './clock';
 import { ulid, type RandomBytes, cryptoRandom } from './ulid';
 
 export const MARKER_TYPES = ['earmark', 'great', 'cutaway', 'inout', 'note'] as const;
@@ -59,6 +59,10 @@ export interface Marker {
   note: string;
   source: MarkerSource;
   preroll_ms: number;
+  /** Date.now() at pointerdown (§3.4). The witness, and what a correction re-derives from. */
+  wall_ms: number;
+  /** How this marker's timecode was derived (§3.4): mono | wall-fallback | corrected. */
+  clock: ClockProvenance;
   audio_path: string | null;
   device: string;
   created_at: string;
@@ -70,8 +74,11 @@ export interface CreateMarkerInput {
   session_id: string;
   camera_id: string;
   type: MarkerType;
-  /** The monotonic reading captured in pointerdown. Never read a clock in here. */
-  tCapturedMs: number;
+  /**
+   * Both clock readings, sampled together in pointerdown (§3.4). Never read a clock in
+   * here — this module cannot, which is the point.
+   */
+  captured: ClockReading;
   clock: TcClock;
   device: string;
   note?: string;
@@ -90,18 +97,26 @@ export function prerollFor(type: MarkerType, override?: number): number {
   return ms;
 }
 
+/** Pre-roll expressed in frames at this clock's real rate (§5). */
+function prerollFrames(clock: TcClock, prerollMs: number): number {
+  return Math.round((prerollMs / 1000) * realFps(clock.fps));
+}
+
 /**
  * Frame the marker should land on: the captured instant, rolled back by the pre-roll
  * (§5). Computed in real frames, then wrapped into the 24-hour day.
+ *
+ * Carries the provenance out with it (§3.4): if the monotonic counter had paused, this
+ * frame came from wall time and the marker must say so rather than look exact.
  */
 export function markerFrame(
   clock: TcClock,
-  tCapturedMs: number,
+  captured: ClockReading,
   prerollMs: number,
-): number {
-  const atTap = clock.tcFrameAt(tCapturedMs);
-  const rolledBack = atTap - Math.round((prerollMs / 1000) * realFps(clock.fps));
-  return wrapFrame(rolledBack, clock.fps, clock.drop);
+): { frame: number; clock: ClockProvenance } {
+  const reading = clock.readAt(captured);
+  const rolledBack = reading.frame - prerollFrames(clock, prerollMs);
+  return { frame: wrapFrame(rolledBack, clock.fps, clock.drop), clock: reading.clock };
 }
 
 export function createMarker(input: CreateMarkerInput): Marker {
@@ -109,7 +124,7 @@ export function createMarker(input: CreateMarkerInput): Marker {
     session_id,
     camera_id,
     type,
-    tCapturedMs,
+    captured,
     clock,
     device,
     note = '',
@@ -122,7 +137,7 @@ export function createMarker(input: CreateMarkerInput): Marker {
   if (!MARKER_TYPES.includes(type)) throw new Error(`unknown marker type ${JSON.stringify(type)}`);
 
   const preroll_ms = prerollFor(type, input.prerollMs);
-  const frame = markerFrame(clock, tCapturedMs, preroll_ms);
+  const { frame, clock: provenance } = markerFrame(clock, captured, preroll_ms);
   const created = new Date(nowMs).toISOString();
 
   return {
@@ -136,11 +151,37 @@ export function createMarker(input: CreateMarkerInput): Marker {
     note,
     source,
     preroll_ms,
+    wall_ms: captured.wall,
+    clock: provenance,
     audio_path,
     device,
     created_at: created,
     updated_at: created,
     deleted_at: null,
+  };
+}
+
+/**
+ * §3.4: after a successful re-lock, every marker taken while the lock was stale is
+ * re-derived from its wall timestamp against the new anchor, and flagged `corrected`.
+ * The pre-roll is re-applied, because `wall_ms` is the raw pointerdown instant.
+ *
+ * Markers already on `mono` are returned untouched — correcting a good marker against a
+ * newer anchor would move a number that was right.
+ */
+export function correctMarker(marker: Marker, clock: TcClock, nowMs: number = Date.now()): Marker {
+  if (marker.clock !== 'wall-fallback') return marker;
+  const frame = wrapFrame(
+    clock.frameAtWall(marker.wall_ms) - prerollFrames(clock, marker.preroll_ms),
+    clock.fps,
+    clock.drop,
+  );
+  return {
+    ...marker,
+    frame,
+    tc: framesToTc(frame, clock.fps, clock.drop),
+    clock: 'corrected',
+    updated_at: new Date(nowMs).toISOString(),
   };
 }
 

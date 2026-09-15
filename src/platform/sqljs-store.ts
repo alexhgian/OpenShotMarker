@@ -12,8 +12,9 @@
  */
 
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
-import { SCHEMA_SQL, SCHEMA_VERSION } from '../core/schema';
+import { SCHEMA_SQL, SCHEMA_VERSION, MIGRATIONS } from '../core/schema';
 import type { Marker, Session, Camera, MarkerType, MarkerSource } from '../core/markers';
+import type { ClockProvenance } from '../core/clock';
 import type { FpsName } from '../core/timecode';
 import type { MarkerStore } from './store';
 import { type BlobStore, MemoryBlobStore } from './blob';
@@ -53,11 +54,37 @@ export class SqlJsStore implements MarkerStore {
     }
     const saved = await this.blobs.get(DB_KEY);
     this.db = saved ? new SqlJsStore.sql.Database(saved) : new SqlJsStore.sql.Database();
+
+    // Read the version BEFORE creating tables: on a fresh database `meta` does not
+    // exist yet, and on an old one the create-if-not-exists below is a no-op, so this
+    // is the only moment the two cases are distinguishable.
+    const found = saved ? this.storedVersion() : SCHEMA_VERSION;
     this.db.run(SCHEMA_SQL);
+    this.migrate(found);
+
     this.db.run('insert or replace into meta (key, value) values (?, ?)', [
       'schema_version',
       String(SCHEMA_VERSION),
     ]);
+  }
+
+  /** The schema version recorded in a database we just opened; 1 if it predates `meta`. */
+  private storedVersion(): number {
+    try {
+      const rows = this.all("select value from meta where key = 'schema_version'");
+      const raw = rows[0]?.value;
+      return raw == null ? 1 : Number(raw);
+    } catch {
+      // No meta table at all: this database predates it, so it is v1 by definition.
+      return 1;
+    }
+  }
+
+  private migrate(from: number): void {
+    for (let v = from + 1; v <= SCHEMA_VERSION; v++) {
+      const sql = MIGRATIONS[v];
+      if (sql) this.handle.run(sql);
+    }
   }
 
   private get handle(): Database {
@@ -167,17 +194,20 @@ export class SqlJsStore implements MarkerStore {
   async putMarker(m: Marker): Promise<void> {
     this.handle.run(
       `insert into markers (id, session_id, camera_id, tc, frame, type, color, note, source,
-                            preroll_ms, audio_path, device, created_at, updated_at, deleted_at)
-       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            preroll_ms, wall_ms, clock, audio_path, device, created_at,
+                            updated_at, deleted_at)
+       values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        on conflict(id) do update set
          tc = excluded.tc, frame = excluded.frame, type = excluded.type,
          color = excluded.color, note = excluded.note, source = excluded.source,
-         preroll_ms = excluded.preroll_ms, audio_path = excluded.audio_path,
+         preroll_ms = excluded.preroll_ms, wall_ms = excluded.wall_ms,
+         clock = excluded.clock, audio_path = excluded.audio_path,
          updated_at = excluded.updated_at, deleted_at = excluded.deleted_at
        where excluded.updated_at >= markers.updated_at`,
       [
         m.id, m.session_id, m.camera_id, m.tc, m.frame, m.type, m.color, m.note, m.source,
-        m.preroll_ms, m.audio_path, m.device, m.created_at, m.updated_at, m.deleted_at,
+        m.preroll_ms, m.wall_ms, m.clock, m.audio_path, m.device, m.created_at,
+        m.updated_at, m.deleted_at,
       ],
     );
   }
@@ -194,6 +224,8 @@ export class SqlJsStore implements MarkerStore {
       note: str(r.note),
       source: str(r.source) as MarkerSource,
       preroll_ms: num(r.preroll_ms),
+      wall_ms: num(r.wall_ms),
+      clock: str(r.clock) as ClockProvenance,
       audio_path: strOrNull(r.audio_path),
       device: str(r.device),
       created_at: str(r.created_at),

@@ -11,11 +11,12 @@ import {
 } from '../../src/core/export/tcfix';
 import { createMarker, createSession, createCamera, softDelete } from '../../src/core/markers';
 import type { Marker, Camera, Session } from '../../src/core/markers';
-import { TcClock, OFFSET_MEANING } from '../../src/core/clock';
+import { TcClock, OFFSET_MEANING, type ClockReading } from '../../src/core/clock';
 import { tcToFrames } from '../../src/core/timecode';
 
 const fixedRandom = (len: number) => new Uint8Array(len).fill(0);
 const NOW = 1_757_000_000_000;
+const running = (ms: number): ClockReading => ({ mono: ms, wall: NOW + ms });
 
 function fixture(): { session: Session; cameras: Camera[]; markers: Marker[] } {
   const session: Session = {
@@ -63,7 +64,7 @@ function fixture(): { session: Session; cameras: Camera[]; markers: Marker[] } {
   const clock = new TcClock({
     fps: '29.97',
     drop: true,
-    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), t: 0 },
+    anchor: { tcFrame: tcToFrames('10:14:22;07', '29.97', true), ...running(0) },
   });
 
   const markers = [
@@ -71,7 +72,7 @@ function fixture(): { session: Session; cameras: Camera[]; markers: Marker[] } {
       session_id: session.id,
       camera_id: 'cam-a',
       type: 'great',
-      tCapturedMs: 0,
+      captured: running(0),
       prerollMs: 0,
       clock,
       device: 'alex-iphone',
@@ -89,8 +90,8 @@ describe('§10.3 CSV', () => {
     const { cameras, markers } = fixture();
     const csv = markersToCsv(markers, { cameraKeys: cameraKeyMap(cameras) });
     const lines = csv.trimEnd().split('\r\n');
-    expect(lines[0]).toBe('timecode,frame,camera,type,note,source,created,device');
-    expect(CSV_COLUMNS).toHaveLength(8);
+    expect(lines[0]).toBe('timecode,frame,camera,type,note,source,clock,created,device');
+    expect(CSV_COLUMNS).toHaveLength(9);
     expect(lines).toHaveLength(2);
     expect(lines[1]).toContain('10:14:22;07,1104761,A,great,');
     expect(lines[1]).toContain('voice');
@@ -148,6 +149,15 @@ describe('§10.4 the fix file', () => {
     expect(m.color).toBe('Green');
     expect(m.note).toBe('second chorus, the hair flip');
     expect(m.source).toBe('voice');
+    // §3.4 provenance rides along; TCFix.py ignores it.
+    expect(m.clock).toBe('mono');
+  });
+
+  it('carries the §3.4 clock provenance per marker', () => {
+    const fx = fixture();
+    const stale = { ...fx.markers[0]!, clock: 'wall-fallback' as const };
+    const f = buildTcfix({ ...fx, markers: [stale] });
+    expect(f.markers[0]!.clock).toBe('wall-fallback');
   });
 
   it('writes offset_meaning on the non-reference camera only', () => {

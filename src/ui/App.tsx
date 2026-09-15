@@ -16,21 +16,43 @@ import {
   createCamera,
   softDelete,
   withNote,
+  correctMarker,
   type Marker,
   type MarkerType,
   type Session,
   type Camera,
 } from '../core/markers';
-import { TcClock, performanceNow, measureOffsetFrames, OFFSET_MEANING } from '../core/clock';
-import { tcToFrames, isFpsName, FPS_NAMES, dropAllowed, type FpsName } from '../core/timecode';
+import {
+  TcClock,
+  measureOffsetFrames,
+  OFFSET_MEANING,
+  type ClockReading,
+} from '../core/clock';
+import {
+  framesToTc,
+  tcToFrames,
+  isFpsName,
+  FPS_NAMES,
+  dropAllowed,
+  type FpsName,
+} from '../core/timecode';
 import { buildTcfix, tcfixToJson, tcfixFilename } from '../core/export/tcfix';
 import { markersToCsv, cameraKeyMap } from '../core/export/csv';
 import { SqlJsStore } from '../platform/sqljs-store';
 import { IndexedDbBlobStore } from '../platform/blob';
+import { readClock, performanceClock, type ClockSource } from '../platform/clock';
 import { MarkerRecorder } from './recorder';
 import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 
 const DEVICE = 'browser-harness';
+
+/**
+ * §3.3: the browser has nothing better than performance.now(), which pauses in deep
+ * sleep. On device, resolveClockSource() returns the continuous-clock plugin instead;
+ * the harness relies on the §3.4 stale guard to catch the paused counter.
+ */
+const CLOCK: ClockSource = performanceClock;
+const now = (): ClockReading => readClock(CLOCK);
 const SESSION_LABEL = 'dev harness session';
 
 const TYPE_STYLES: Record<MarkerType, string> = {
@@ -53,11 +75,15 @@ export function App() {
   const [markers, setMarkers] = useState<Marker[]>([]);
   const [note, setNote] = useState('');
   const [running, setRunning] = useState<string>('--:--:--:--');
+  const [stale, setStale] = useState(false);
   const [queue, setQueue] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const camerasRef = useRef<CameraState[]>([]);
   camerasRef.current = cameras;
+  // lockCamera has no deps on purpose (it must not be re-created on every marker), so
+  // it reaches the current recorder through a ref rather than closing over a stale one.
+  const recorderRef = useRef<MarkerRecorder | null>(null);
 
   const refCam = useMemo(
     () => cameras.find((c) => c.camera.key === session?.reference_camera) ?? cameras[0] ?? null,
@@ -113,7 +139,9 @@ export function App() {
     if (!refCam?.clock) return;
     let raf = 0;
     const tick = () => {
-      setRunning(refCam.clock!.tcAt(performanceNow()));
+      const reading = refCam.clock!.readAt(now());
+      setRunning(framesToTc(reading.frame, refCam.clock!.fps, refCam.clock!.drop));
+      setStale(reading.stale);
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -130,13 +158,15 @@ export function App() {
       session_id: session.id,
       camera_id: refCam.camera.id,
       device: DEVICE,
-      now: performanceNow,
+      now,
       onCommitted: () => {
         void store.queueDepth(session.id).then(setQueue);
       },
       onError: (_m, err) => setError(String(err)),
     });
   }, [store, session, refCam]);
+
+  recorderRef.current = recorder;
 
   /**
    * §9 rule 1. `recorder.capture` is synchronous and takes performance.now() on its
@@ -157,7 +187,7 @@ export function App() {
 
   const lockCamera = useCallback(
     (key: string, tc: string, fps: FpsName, drop: boolean) => {
-      const t = performanceNow();
+      const reading = now();
       let tcFrame: number;
       try {
         tcFrame = tcToFrames(tc, fps, drop);
@@ -166,15 +196,44 @@ export function App() {
         return;
       }
       setError(null);
+
+      // §3.4: the anchor carries both clocks, so a later read can tell whether the
+      // monotonic counter kept running.
+      const clock = new TcClock({
+        fps,
+        drop,
+        anchor: { tcFrame, mono: reading.mono, wall: reading.wall },
+      });
+
       setCameras((prev) =>
         prev.map((c) =>
           c.camera.key !== key
             ? c
             : {
-                camera: { ...c.camera, fps, drop_frame: drop, last_locked_at: new Date().toISOString() },
-                clock: new TcClock({ fps, drop, anchor: { tcFrame, t } }),
+                camera: {
+                  ...c.camera,
+                  fps,
+                  drop_frame: drop,
+                  last_locked_at: new Date().toISOString(),
+                },
+                clock,
               },
         ),
+      );
+      setStale(false);
+
+      // §3.4: markers taken while the lock was stale are re-derived against the new
+      // anchor and flagged `corrected`. Only markers on this camera, and only the
+      // wall-fallback ones — correctMarker returns the rest untouched.
+      setMarkers((prev) =>
+        prev.map((m) => {
+          if (m.clock !== 'wall-fallback') return m;
+          const target = camerasRef.current.find((c) => c.camera.key === key);
+          if (!target || m.camera_id !== target.camera.id) return m;
+          const corrected = correctMarker(m, clock);
+          recorderRef.current?.update(corrected);
+          return corrected;
+        }),
       );
     },
     [],
@@ -185,11 +244,11 @@ export function App() {
     if (!store || !session) return;
     const ref = camerasRef.current.find((c) => c.camera.key === session.reference_camera);
     if (!ref?.clock) return;
-    const t = performanceNow();
+    const reading = now();
     for (const c of camerasRef.current) {
       if (c === ref || !c.clock) continue;
       try {
-        const offset = measureOffsetFrames(ref.clock, c.clock, t);
+        const offset = measureOffsetFrames(ref.clock, c.clock, reading);
         if (c.camera.offset_frames === offset) continue;
         const updated: Camera = {
           ...c.camera,
@@ -277,6 +336,8 @@ export function App() {
         cameras={cameras}
         onLock={lockCamera}
         queue={queue}
+        stale={stale}
+        referenceKey={session.reference_camera}
       />
 
       <section className="rounded-xl bg-black/40 py-4 text-center">
@@ -285,12 +346,20 @@ export function App() {
           {refCam?.camera.drop_frame ? ' DF' : ' NDF'}
         </div>
         <div
-          className="font-mono text-4xl tabular-nums tracking-tight"
+          className={`font-mono text-4xl tabular-nums tracking-tight ${
+            stale ? 'text-red-400' : ''
+          }`}
           data-testid="running-tc"
           data-locked={refCam?.clock ? 'yes' : 'no'}
+          data-stale={stale ? 'yes' : 'no'}
         >
           {running}
         </div>
+        {stale && (
+          <div className="mt-1 text-[11px] font-medium text-red-400" data-testid="stale-banner">
+            STALE — the phone slept. Markers are being timed from wall clock; re-lock.
+          </div>
+        )}
       </section>
 
       <section className="grid grid-cols-2 gap-2" data-testid="pad">
@@ -356,11 +425,15 @@ function SessionStrip({
   cameras,
   onLock,
   queue,
+  stale,
+  referenceKey,
 }: {
   session: Session;
   cameras: CameraState[];
   onLock: (key: string, tc: string, fps: FpsName, drop: boolean) => void;
   queue: number;
+  stale: boolean;
+  referenceKey: string;
 }) {
   const [open, setOpen] = useState<string | null>(null);
 
@@ -373,17 +446,24 @@ function SessionStrip({
         </span>
       </div>
       <div className="flex flex-wrap gap-2">
-        {cameras.map(({ camera, clock }) => (
+        {cameras.map(({ camera, clock }) => {
+          // §3.4: a stale lock is red and says so. Staleness is measured on the
+          // reference clock, which is the one the running timecode comes from.
+          const isStale = stale && clock !== null && camera.key === referenceKey;
+          return (
           <button
             key={camera.key}
             type="button"
             data-testid={`chip-${camera.key}`}
+            data-state={!clock ? 'never' : isStale ? 'stale' : 'locked'}
             onClick={() => setOpen(open === camera.key ? null : camera.key)}
             className={`rounded-full px-3 py-1 text-xs ring-1 ${
-              clock ? 'bg-emerald-950/60 text-emerald-300 ring-emerald-800' : 'bg-red-950/50 text-red-300 ring-red-900'
+              !clock || isStale
+                ? 'bg-red-950/50 text-red-300 ring-red-900'
+                : 'bg-emerald-950/60 text-emerald-300 ring-emerald-800'
             }`}
           >
-            {camera.key} · {clock ? 'LOCKED' : 'NEVER LOCKED'}
+            {camera.key} · {!clock ? 'NEVER LOCKED' : isStale ? 'STALE — re-lock' : 'LOCKED'}
             {camera.offset_frames !== 0 && (
               <span className="ml-1 opacity-80">
                 · {camera.offset_frames > 0 ? '+' : ''}
@@ -391,7 +471,8 @@ function SessionStrip({
               </span>
             )}
           </button>
-        ))}
+          );
+        })}
       </div>
       {open && <LockSheet cameraKey={open} onLock={onLock} onClose={() => setOpen(null)} />}
     </header>
@@ -502,6 +583,7 @@ function MarkerList({
             data-tc={m.tc}
             data-frame={m.frame}
             data-type={m.type}
+            data-clock={m.clock}
             className="flex items-center gap-2 rounded-lg bg-stone-900/70 px-2 py-2 text-sm"
           >
             <span className="font-mono tabular-nums text-stone-200" data-testid="marker-tc">
