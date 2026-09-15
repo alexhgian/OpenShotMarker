@@ -13,6 +13,8 @@ finished Resolve plugin, and this brief. Nothing else exists yet.
 | `sql.js` local store, Supabase schema and sync code | Native speech recognition on device |
 | Capacitor project scaffold, `npx cap add android` / `add ios` (folders only) | First live run of `TCFix.py` inside Resolve (§11.4) |
 | Android debug APK, if the SDK is installed (optional) | Focus/exposure lock (Phase 5 native plugin) |
+| `pi-tracker/` reader, tracker and server against recorded fixtures | `picamera2` capture, calibration on the real LCD |
+| `tcmath.py` and its shared self-test | chrony on the rig network |
 
 **Phases 1 and 2 are cloud-complete.** Phase 3's OCR pipeline can be written and unit-tested
 in the cloud against recorded frames, but its acceptance is on a phone pointed at the FX30.
@@ -34,8 +36,9 @@ Build the tool that works with **no camera, no microphone and no network**:
 
 1. `src/core/timecode.ts` — rates table, `framesToTc`, `tcToFrames`, `realFps`. Tested
    against the vectors below.
-2. `src/core/clock.ts` — anchor `{tcFrame, t}`, `rate`, `tcFrameAt(tNow)`. Injectable clock
-   for tests; production uses `performance.now()`.
+2. `src/core/clock.ts` — anchor `{tcFrame, mono, wall}`, `rate`, `tcFrameAt(monoNow,
+   wallNow)` returning `{ frame, stale, clock }`. The clock source is injected; tests use a
+   fake. Production wires `platform/clock.ts`.
 3. `src/core/markers.ts` — marker creation with pre-roll, type→colour map, ULIDs.
 4. `src/core/export/csv.ts` and `src/core/export/tcfix.ts` — the latter must produce a file
    that `python resolve-plugin/TCFix.py --selftest`'s loader accepts, and whose frame
@@ -50,6 +53,9 @@ Build the tool that works with **no camera, no microphone and no network**:
    `NSMicrophoneUsageDescription` placeholders in `Info.plist` for later phases.
 8. `supabase/migrations/0001_markers.sql` — the §8 schema in Postgres, with RLS enabled and
    a permissive org policy stub. Not applied from the cloud; committed for the desktop step.
+9. `src/platform/clock.ts` and the in-repo Capacitor plugin `continuous-clock` with iOS,
+   Android and web implementations. The native files are written and committed but not
+   built in the cloud.
 
 ## Phase 1 — acceptance
 
@@ -66,6 +72,13 @@ Build the tool that works with **no camera, no microphone and no network**:
 - The pointerdown handler that creates a marker contains no `await` before the timestamp
   is captured. Add a lint rule or a unit test that proves the timestamp is taken before
   the store write resolves.
+- Sleep simulation test: lock at `10:00:00;00`, advance the fake wall clock 20 minutes while
+  the fake monotonic clock advances 0, read the clock → `stale === true`,
+  `clock === "wall-fallback"`, frame equals 20 minutes of 29.97 DF frames from the anchor.
+  Then re-lock and assert the marker placed during the stale window is re-derived and
+  flagged `"corrected"`.
+- The exported `.tcfix.json` carries `clock` per marker; `TCFix.py` ignores it (no change
+  needed there — it is informational).
 
 ## Test vectors (the same ones `TCFix.py --selftest` uses)
 
@@ -105,10 +118,23 @@ FCPXML rational at 29.97
 
 ---
 
+## Amendments
+
+`docs/amendments/` holds numbered changes to the spec and to this file, written after the
+spec was frozen. Each says exactly what to replace or add. **Apply them in order before
+building anything**; the spec on disk is authoritative only once they are applied.
+
+- `0001-clock-and-pi-tracker.md` — sleep-safe clock (changes Phase 1 scope and acceptance:
+  three-value anchor, `platform/clock.ts`, `continuous-clock` plugin, sleep-simulation test)
+  and the Raspberry Pi tracker (§16–17, later phases; only `tcmath.py` factoring is Phase 1).
+
 ## Kickoff prompt (paste into Claude Code)
 
 > Read `CLAUDE.md`, then `HANDOFF.md`, then `docs/timecode-markers-spec-v2.md` in full.
-> Build Phase 1 exactly as scoped in `HANDOFF.md`. Start with `src/core/timecode.ts` and
+> Then read every file in `docs/amendments/` in numeric order and apply each one to the spec
+> and to `HANDOFF.md` exactly as it specifies, committing each application separately and
+> noting under the spec's title which amendments are applied. Only then build Phase 1
+> exactly as scoped in the amended `HANDOFF.md`. Start with `src/core/timecode.ts` and
 > its tests using the vectors in the handoff — do not write any UI until the core tests are
 > green and `python resolve-plugin/TCFix.py --selftest` passes in this environment. Then the
 > clock, markers, store, exports, and finally the single-screen UI with a Playwright check.

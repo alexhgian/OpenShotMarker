@@ -1,5 +1,7 @@
 # Timecode Markers — technical spec, v2 (standalone app)
 
+**Amendments applied: `0001` (`docs/amendments/0001-clock-and-pi-tracker.md` — sleep-safe clock, Pi tracker).**
+
 Earwig-style shot marking as its own phone app: read the camera's timecode off its LCD once,
 free-run a local clock from there, log moments by button, text or voice, measure the offset
 between cameras, and hand DaVinci Resolve one file that fixes camera timecode and imports
@@ -164,19 +166,57 @@ tcFrame(tNow) = anchor.tcFrame + Math.round((tNow - anchor.t) / 1000 * realFps *
 a show would otherwise jump every marker after it. `rate` defaults to `1.0` and is the drift
 term (§5).
 
-This is also why backgrounding is harmless: iOS throttling timers while the screen is off
-changes nothing, because nothing is counting ticks. Wake the phone, read `performance.now()`,
-the number is right. (Verify on device that `performance.now()` keeps advancing across a
-lock/unlock — it does on current iOS and Android, but it is the one assumption here that a
-platform could break.)
+**The clock must keep counting through device sleep.** `performance.now()` does not — it is
+backed by a counter that pauses in deep sleep on both iOS and Android. Production reads time
+through `platform/clock.ts`, which on device calls a small native plugin returning
+`mach_continuous_time()` (iOS) or `SystemClock.elapsedRealtimeNanos()` (Android). Both
+advance through sleep. In the browser harness the fallback is `performance.now()` plus the
+dual-anchor guard in §3.4, which detects a paused counter rather than trusting it.
 
-**An anchor does not survive a process restart, and must not be persisted as if it did.**
-`anchor.t` is meaningful only within the `performance.now()` epoch it was taken in, and that
-epoch ends when the page or the app is killed. Restoring one across a restart would produce
-confidently wrong timecode rather than an obvious failure, so markers persist and the lock
-does not: on relaunch the camera shows as unlocked and the operator re-locks. This is cheap
-(§4: a re-lock is point-and-hold once the ROI is stored) and it is the safe direction to be
-wrong in. The browser harness asserts it after a reload.
+**An anchor is not restored across a restart.** `anchor.mono` is meaningful only within the
+epoch its counter is measured from, and the two platforms differ: `performance.now()` is
+relative to the document, so a browser reload ends it, while `mach_continuous_time` and
+`elapsedRealtimeNanos` are relative to boot, so they would survive an app restart but not a
+reboot. Rather than persist an anchor and carry a per-platform rule about when it is still
+valid — plus reboot detection — markers persist and the lock does not: on relaunch the camera
+shows as unlocked and the operator re-locks. This is cheap (§4: a re-lock is point-and-hold
+once the ROI is stored) and it is the safe direction to be wrong in. The browser harness
+asserts it after a reload. Revisit this once §16's tracker makes an anchor cheap to re-fetch.
+
+### 3.4 Dual anchor and the stale-lock guard
+
+Every anchor stores three values, not two:
+
+```ts
+interface Anchor { tcFrame: number; mono: number /* ns */; wall: number /* ms epoch */ }
+```
+
+On every read of the running clock:
+
+```ts
+const dMono = (monoNow - anchor.mono) / 1e6;   // ms
+const dWall =  wallNow - anchor.wall;          // ms
+const skew  =  dWall - dMono;
+```
+
+`wall` is `Date.now()` — the thing §3.3 forbids for computing timecode. It is used here only
+as a witness. Under normal running, `|skew|` stays within a few hundred milliseconds (network
+time corrections are small and rare). If `|skew| > 1000 ms`, the monotonic counter paused
+while wall time kept going: the lock is **stale**.
+
+When a lock is stale:
+
+- The camera chip turns red: `STALE — re-lock`.
+- Markers are **still accepted** — losing the operator's intent is worse than an imprecise
+  time. Their timecode is computed from `dWall` instead of `dMono`, and the marker carries
+  `clock: "wall-fallback"` (default `"mono"`). Wall time is typically within ~100 ms, so the
+  marker is usable and honestly labelled.
+- On the next successful lock, markers flagged `wall-fallback` since the previous lock are
+  re-derived from their `wall` timestamp against the new anchor and the flag is cleared to
+  `"corrected"`. Store `wall` on every marker for this reason.
+
+With the native clock plugin in place, skew stays near zero and the guard never fires. It
+stays in the code as the thing that catches the day it does.
 
 ---
 
@@ -329,6 +369,7 @@ create table cameras (
   bin_hint     text,                      -- Resolve bin name, optional
   last_locked_at timestamptz,
   lock_quality jsonb,                     -- {inliers, residual_frames}
+  anchor       jsonb,                     -- {tcFrame, mono, wall} — the §3.4 three-value anchor
   unique (session_id, key)
 );
 
@@ -343,6 +384,8 @@ create table markers (
   note         text not null default '',
   source       text not null,             -- tap | voice | typed
   preroll_ms   integer not null,
+  wall_ms      bigint not null,           -- Date.now() at pointerdown; witness + fallback (§3.4)
+  clock        text not null default 'mono',  -- mono | wall-fallback | corrected (§3.4)
   audio_path   text,                      -- local only, never synced
   device       text not null,
   created_at   timestamptz not null,
@@ -594,6 +637,10 @@ minute boundary, and passes every casual test.
 **`performance.now()`, never `Date.now()`.** A clock correction mid-show silently shifts
 every subsequent marker.
 
+**`performance.now()` stops in deep sleep.** So does `CLOCK_MONOTONIC` on Linux and Android
+and `mach_absolute_time` on iOS. Read `mach_continuous_time` / `elapsedRealtimeNanos` /
+`CLOCK_BOOTTIME` for anything that must survive a pocket. Keep the wall-clock witness.
+
 **Timestamp the video frame, not the OCR result.** `requestVideoFrameCallback` metadata
 exists for this.
 
@@ -626,18 +673,25 @@ tc-marker/
       timecode.ts  clock.ts  lockfit.ts  offsets.ts
       export/edl.ts  fcpxml.ts  csv.ts  tcfix.ts
     platform/               plugin adapters behind interfaces
-      camera.ts  speech.ts  store.ts  share.ts  sync.ts
+      camera.ts  speech.ts  store.ts  share.ts  sync.ts  clock.ts  locksource.ts
     ui/
   ios/  android/            generated by Capacitor
   supabase/
     migrations/0001_markers.sql
 resolve-plugin/
   TCFix.py
+  tcmath.py                 the timecode maths; one source of truth, shared with pi-tracker/
   example.tcfix.json
+pi-tracker/                 Python service for the Pi. See §16.
+  tcmath.py                 shared with resolve-plugin/ (symlink or package; one source of truth)
+  fixtures/                 recorded LCD footage for tests
 ```
 
 **Plugins (v1):** `@capacitor-community/sqlite`, `@capacitor-community/speech-recognition`,
-`@capacitor/share`, `@capacitor/filesystem`. Camera via `getUserMedia` in the WebView for
+`@capacitor/share`, `@capacitor/filesystem`, and the in-repo
+`@egen/capacitor-continuous-clock` — ~15 lines per platform, one method `now(): { ns: number }`
+returning `mach_continuous_time()` / `SystemClock.elapsedRealtimeNanos()`, with a web
+implementation returning `performance.now() * 1e6` (§3.3, §3.4). Camera via `getUserMedia` in the WebView for
 v1 (needs `NSCameraUsageDescription`); a camera-preview plugin only if focus/exposure lock
 proves necessary.
 
@@ -682,9 +736,151 @@ timecode per camera per session — and Phase 4's plugin — is still most of th
 3. **Supabase or the panel as the shared store on show days?** This spec says Supabase and
    treats the panel as an optional trigger (Phase 5). If show-day operators live in the
    panel, a read-only markers view there is cheap once the data is in Supabase.
-4. **If you outgrow OCR:** the FX30 takes external timecode over the shoe (Tentacle,
-   UltraSync, Deity, Røde). That fixes the cameras to each other and makes §6 unnecessary.
-   The app still earns its place for the marking.
+4. **Pi tracker vs. HDMI capture.** §16 reads the LCD to stay similar to the phone and to
+   leave the HDMI port alone. If the LCD read proves unreliable at rig angles, the same
+   `tracker.py` can take frames from a TC358743 HDMI-to-CSI bridge with HDMI info display
+   on — cleaner digits, no glare, at the cost of an HDMI splitter. The pipeline from step 2
+   onward is identical; only the capture source and the ROI change.
+
+---
+
+## 16. Pi tracker
+
+### 16.1 Hardware
+
+| Part | Choice | Why |
+|---|---|---|
+| Board | Raspberry Pi 4 (2 GB) or Pi 5 | Tesseract at 2–4 reads/s plus OpenCV template matching at frame rate. A Zero 2 W handles template matching but not continuous Tesseract; treat it as a stretch target. |
+| Camera | Camera Module 3 (standard or Wide) | Autofocus that can be **locked**; manual exposure and gain via `picamera2`. Wide helps at the short distances a rig allows. |
+| Mount | Cold-shoe → 1/4"-20 mini arm, printed enclosure | The FX30 has no EVF — the LCD is the operator's monitor. The module sits at a top corner on a short arm, looking down at ~30°, so it sees the readout without blocking the operator. Perspective is handled in software (16.3). |
+| Power | D-tap → 5 V 3 A USB-C step-down, off the rig battery | ~3 W. Same battery the camera runs on; the Pi comes up and goes down with the rig. |
+| Network | Rig WiFi or a small travel router; wired if there's a cart | Phones reach it at `tracker-<cam>.local`. |
+
+### 16.2 Software
+
+A Python service, `pi-tracker/`, alongside the app. Python because `picamera2`, OpenCV and
+Tesseract are all native there, and because the timecode maths already exists in Python in
+`resolve-plugin/TCFix.py` — factor `frames_to_tc`, `tc_to_frames`, `RATES` into
+`tcmath.py` shared by both. Same self-test vectors, third implementation, same rule: the
+vectors are the contract.
+
+```
+pi-tracker/
+  tracker.py        capture loop, ROI rectify, read, fit, anchor, discontinuity log
+  reader.py         Tesseract (validation) + learned-glyph template matching (per frame)
+  tcmath.py         shared with resolve-plugin/
+  server.py         HTTP + WebSocket on :8600
+  calibrate.py      one-time ROI quad + exposure/focus lock, via the same web page
+  tracker.service   systemd, restart=always
+  config.yaml       camera key, fps, drop, ROI quad, exposure, gain, focus, chrony peers
+```
+
+Clock: `time.clock_gettime(time.CLOCK_BOOTTIME)` for the anchor, so it's the same class of
+counter as the phone's native plugin. Frame timestamps come from `picamera2`'s per-frame
+`SensorTimestamp` metadata — the exact analogue of `requestVideoFrameCallback`, and the same
+rule applies: timestamp the frame, never the read.
+
+### 16.3 Read pipeline
+
+1. **ROI is a quad, not a rectangle.** The module looks at the LCD off-axis; four corners
+   dragged once in the calibration page give a homography, and every frame is rectified to a
+   flat strip before reading. Calibration stores the quad and the locked exposure/gain/focus.
+2. **Lock** is §4.1 unchanged: a 2-second burst through Tesseract, least-squares fit, the
+   same acceptance gate, the intercept is the anchor. Runs at boot and after any
+   discontinuity.
+3. **Track** is §4.2 made real: the digits read during the lock become templates for 0–9,
+   and every subsequent frame is read by normalized cross-correlation over the eight cells —
+   cheap enough for frame rate on a Pi 4. Tesseract re-validates one frame every few seconds
+   so a drifting template can't quietly go wrong.
+4. **Re-anchor** on a sliding 2-second window every 2 seconds. Drift against the Pi's clock
+   is therefore always under a frame, and the measured slope over ≥ 30 minutes is the
+   camera's real `rate` — logged, and exported on the camera record.
+5. **Discontinuity** = a read more than 2 frames from the prediction, confirmed on the next
+   frame. Log it with wall time and both values (`10:14:22;07 → 00:00:00;00`), mark the
+   anchor invalid, re-lock. A **static** readout for > 2 seconds is reported as
+   `not-running` — the Rec Run / display-off case from §1 — and the chip goes red on every
+   phone.
+
+### 16.4 Protocol
+
+`GET /tc` and a WebSocket at `/tc/stream` (one message per second) both return:
+
+```json
+{
+  "camera": "A", "fps": "29.97", "drop": true,
+  "state": "tracking",                      // locking | tracking | not-running | lost
+  "anchor": { "tcFrame": 1104761, "boot_ns": 812345678901234 },
+  "rate": 1.0000123, "rate_baseline_s": 5400,
+  "quality": { "inliers": 58, "residual_frames": 0.3, "last_tesseract_ok": true },
+  "locked_at": "2026-09-15T18:03:40Z",
+  "events": [ { "at": "…", "kind": "discontinuity", "from": "…", "to": "…" } ]
+}
+```
+
+`POST /time` echoes for the handshake: the phone sends `{ t0 }` (its monotonic ns); the Pi
+replies `{ t0, t1, t2 }` with its `CLOCK_BOOTTIME` at receipt and at send.
+
+### 16.5 Phone ↔ Pi handshake
+
+The phone needs the Pi's anchor expressed in its own clock. Standard NTP arithmetic, eight
+samples, keep the one with the smallest round trip:
+
+```
+phone sends t0        Pi receives at t1, replies at t2        phone receives at t3
+delay  = (t3 − t0) − (t2 − t1)
+offset = ((t1 − t0) + (t2 − t3)) / 2        // Pi_clock − phone_clock
+phoneAnchor.mono = piAnchor.boot_ns − offset
+phoneAnchor.tcFrame = piAnchor.tcFrame
+```
+
+On a LAN this lands well under 5 ms — a small fraction of a frame. The phone then runs
+exactly the §3.3 clock from that anchor and re-handshakes every time the Pi's anchor changes
+(the WebSocket message carries it). If the Pi goes unreachable, the phone keeps running on
+its last anchor with the Part A guard, and the chip says `TRACKER LOST · running on last
+lock 12m`.
+
+Implementation: `platform/locksource.ts` defines `LockSource { lock(): Promise<Anchor>;
+watch(cb) }` with two implementations, `PhoneCameraLock` (§4) and `PiTrackerLock` (this
+section). The UI does not know which one it has.
+
+### 16.6 Multi-camera without a phone
+
+Every Pi runs chrony against the same peer (the router, or one Pi elected master). Their
+`CLOCK_BOOTTIME` values differ, but each publishes its anchor alongside a chrony-disciplined
+wall time, so any client — or one Pi acting as aggregator — computes
+`offset(B→A) = tcFrameA(t) − tcFrameB(t)` at the same `t`, continuously. This is the §6
+measurement without the two manual locks, and it writes straight into the `.tcfix.json`
+camera records. `TCFix.py` is unchanged.
+
+### 16.7 What the Pi does not fix
+
+- **Free Run is still mandatory** (§1). The tracker detects Rec Run faster and louder; it
+  cannot work around it.
+- It watches the LCD, so the LCD must show timecode. An operator cycling DISP to a clean view
+  takes the readout away; the tracker reports `lost` until it comes back. The calibration
+  page should say this in large type.
+- Reaction time (§5) is unchanged. Pre-roll still matters more than any of this.
+
+---
+
+## 17. Pi tracker — build order
+
+Sits after Phase 2 and replaces most of Phase 3's phone-camera work, which becomes the
+fallback rather than the primary path.
+
+**Phase 3a — tracker core (cloud-buildable).** `tcmath.py` factored out of `TCFix.py` with
+the shared self-test; `reader.py` and `tracker.py` developed against **recorded frames** —
+a short video of the FX30's LCD shot with a phone, committed under `pi-tracker/fixtures/`,
+is enough to develop rectification, lock, track and discontinuity detection with no Pi
+present. `server.py` with the protocol above, tested with a fake tracker.
+
+**Phase 3b — on the Pi (desktop).** `picamera2` capture, exposure/focus lock, calibration
+page, systemd unit, chrony. One evening with the FX30 on the desk.
+
+**Phase 3c — phone client.** `PiTrackerLock`, the handshake, the `TRACKER LOST` state.
+
+**Phase 3d — phone camera lock (optional).** §4 as originally specified, now the path for
+days with no Pi on the rig.
 
 ---
 
