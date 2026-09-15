@@ -17,6 +17,10 @@
     "verify": "npm run test && npm run verify:crosslang && npm run e2e"
   },
   "dependencies": {
+    "@capacitor/android": "^6.2.2",
+    "@capacitor/cli": "^6.2.2",
+    "@capacitor/core": "^6.2.2",
+    "@capacitor/ios": "^6.2.2",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
     "@types/sql.js": "^1.4.11",
