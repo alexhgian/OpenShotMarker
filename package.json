@@ -12,7 +12,9 @@
     "coverage": "vitest run --coverage",
     "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false || tsc -p tsconfig.json --noEmit",
     "e2e": "playwright test",
-    "selftest:py": "python3 resolve-plugin/TCFix.py --selftest"
+    "selftest:py": "python3 resolve-plugin/TCFix.py --selftest",
+    "verify:crosslang": "npx vite-node scripts/emit-tcfix-fixture.ts -- .tmp-fixture.tcfix.json && python3 resolve-plugin/TCFix.py --selftest && python3 scripts/check_tcfix.py .tmp-fixture.tcfix.json && rm -f .tmp-fixture.tcfix.json",
+    "verify": "npm run test && npm run verify:crosslang"
   },
   "dependencies": {
     "@types/react": "^18.3.31",
