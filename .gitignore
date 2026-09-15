@@ -9,3 +9,4 @@ playwright-report/
 .tmp-fixture.tcfix.json
 __pycache__/
 *.py[cod]
+*.tsbuildinfo

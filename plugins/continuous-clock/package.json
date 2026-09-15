@@ -2,13 +2,25 @@
   "name": "@egen/capacitor-continuous-clock",
   "version": "0.1.0",
   "description": "A monotonic clock that keeps counting while the device sleeps.",
-  "main": "dist/plugin.cjs.js",
-  "module": "dist/esm/index.js",
-  "types": "dist/esm/index.d.ts",
-  "files": ["dist/", "ios/", "android/", "EgenCapacitorContinuousClock.podspec"],
+  "main": "src/index.ts",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "src/",
+    "ios/",
+    "android/",
+    "EgenCapacitorContinuousClock.podspec",
+    "README.md"
+  ],
   "capacitor": {
-    "ios": { "src": "ios" },
-    "android": { "src": "android" }
+    "ios": {
+      "src": "ios"
+    },
+    "android": {
+      "src": "android"
+    }
   },
-  "peerDependencies": { "@capacitor/core": "^6.0.0" }
+  "peerDependencies": {
+    "@capacitor/core": "^6.0.0"
+  }
 }
