@@ -7,3 +7,5 @@ playwright-report/
 *.log
 .DS_Store
 .tmp-fixture.tcfix.json
+__pycache__/
+*.py[cod]
